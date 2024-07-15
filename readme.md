@@ -1,4 +1,4 @@
-# Flask -> Shlink URL Shortener proxy.
+# Yourls -> Flask -> Shlink, URL Shortener proxy.
 
 This is a Flask application that translates a given URL into a shortened link using the Shlink API. The application comes with a Dockerfile and a docker-compose file to build and run the application using Docker.
 
