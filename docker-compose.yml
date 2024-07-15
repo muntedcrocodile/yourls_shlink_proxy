@@ -1,0 +1,10 @@
+version: '3'
+
+services:
+  yourls_shlink_proxy:
+    build: .
+    environment:
+      - SHLINK_URL=${SHLINK_URL}
+      - SHLINK_API_KEY=${SHLINK_API_KEY}
+    ports:
+      - 8080:8080
