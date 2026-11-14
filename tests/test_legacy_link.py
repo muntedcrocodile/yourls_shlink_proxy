@@ -80,3 +80,33 @@ def test_non_json_upstream_response_is_502(client, mocked):
     mocked.post(SHLINK_ENDPOINT, status=502, body="<html>Bad Gateway</html>", content_type="text/html")
     resp = client.get("/?link=" + quote(PASTE, safe=""))
     assert resp.status_code == 502
+
+
+def test_upstream_connection_refused_is_502(client, mocked):
+    # The live failure: SHLINK_URL pointed at an origin that refuses
+    # connections, and every request became an unhandled 500.
+    import requests
+    mocked.post(SHLINK_ENDPOINT, body=requests.ConnectionError("Connection refused"))
+    resp = client.get("/?link=" + quote(PASTE, safe=""))
+    assert resp.status_code == 502
+    assert resp.get_data(as_text=True) == "Error: Cannot reach Shlink"
+
+
+def test_upstream_timeout_is_504(client, mocked):
+    import requests
+    mocked.post(SHLINK_ENDPOINT, body=requests.ReadTimeout("slow"))
+    resp = client.get("/?link=" + quote(PASTE, safe=""))
+    assert resp.status_code == 504
+
+
+def test_upstream_request_has_a_timeout(client, monkeypatch):
+    import app as app_module
+    seen = {}
+
+    def fake_post(url, **kwargs):
+        seen.update(kwargs)
+        raise app_module.requests.ConnectionError()
+
+    monkeypatch.setattr(app_module.requests, "post", fake_post)
+    client.get("/?link=" + quote(PASTE, safe=""))
+    assert 0 < seen["timeout"] < 10

@@ -11,6 +11,9 @@ log = logging.getLogger("yourls_shlink_proxy")
 # Shlink API details
 SHLINK_URL = os.environ.get('SHLINK_URL')
 SHLINK_API_KEY = os.environ.get('SHLINK_API_KEY')
+# Seconds to wait for Shlink. Keep below PrivateBin's 10s client-side abort and
+# gunicorn's worker timeout so the client gets a clean error, not a dropped socket.
+SHLINK_TIMEOUT = float(os.environ.get('SHLINK_TIMEOUT', '8'))
 
 
 class ShlinkError(Exception):
@@ -63,7 +66,15 @@ def shlink_create(long_url):
         'tags': ['PrivateBin'],
         'crawlable': False,
     }
-    response = requests.post(SHLINK_URL, json=request_body, headers=headers)
+    try:
+        response = requests.post(SHLINK_URL, json=request_body, headers=headers,
+                                 timeout=SHLINK_TIMEOUT)
+    except requests.Timeout:
+        raise ShlinkError(504, 'timeout', 'Timed out waiting for Shlink')
+    except requests.RequestException as exc:
+        # Log the exception class only: the message can include the URL.
+        log.error('cannot reach Shlink: %s', type(exc).__name__)
+        raise ShlinkError(502, 'unreachable', 'Cannot reach Shlink')
     return _parse_shlink_response(response)
 
 
