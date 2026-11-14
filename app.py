@@ -33,6 +33,9 @@ class Config:
     tags: tuple = ('privatebin',)
     domain: str | None = None
     crawlable: bool = False
+    # Browser clients (PrivateBin >= 1.3.1 fetch()es the shortener from the
+    # page) need CORS. '*' or a list of exact origins; empty disables CORS.
+    cors_allow_origins: tuple = ('*',)
 
     @property
     def short_urls_endpoint(self):
@@ -64,7 +67,10 @@ class Config:
         if max_visits is not None and max_visits < 1:
             raise ConfigError('SHLINK_MAX_VISITS must be >= 1 (leave empty for unlimited)')
         tags = tuple(t.strip() for t in env.get('SHLINK_TAGS', 'privatebin').split(',') if t.strip())
+        cors = tuple(o.strip().rstrip('/') for o in
+                     env.get('CORS_ALLOW_ORIGINS', '*').split(',') if o.strip())
         return cls(
+            cors_allow_origins=cors,
             max_visits=max_visits,
             tags=tags,
             domain=(env.get('SHLINK_DOMAIN') or '').strip() or None,
@@ -225,12 +231,33 @@ def translate():
     return _text(short['shortUrl'])
 
 
+def add_cors_headers(response):
+    allowed = cfg().cors_allow_origins
+    if not allowed:
+        return response
+    origin = request.headers.get('Origin')
+    if '*' in allowed:
+        response.headers['Access-Control-Allow-Origin'] = '*'
+    elif origin and origin.rstrip('/') in allowed:
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.vary.add('Origin')
+    else:
+        response.vary.add('Origin')
+        return response
+    if request.method == 'OPTIONS':
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Accept'
+        response.headers['Access-Control-Max-Age'] = '86400'
+    return response
+
+
 def create_app(config=None):
     """Application factory. Raises ConfigError if configuration is invalid."""
     config = config or Config.from_env()
     app = Flask(__name__)
     app.config['PROXY'] = config
     app.add_url_rule('/', 'translate', translate, methods=['GET'])
+    app.after_request(add_cors_headers)
     log.info('proxying to Shlink %s (API v%s)', config.shlink_base, config.shlink_api_version)
     return app
 
