@@ -237,3 +237,13 @@ def test_unknown_action(client, params):
 def test_unknown_format_falls_back_to_simple(client):
     resp = api(client, action="version", format="yaml")
     assert resp.mimetype == "text/plain"
+
+
+@pytest.mark.parametrize("params", [
+    {"action": "expand", "shorturl": "http://[x/abc"},       # urlsplit ValueError
+    {"action": "url-stats", "shorturl": "https://[::1/abc"},
+])
+def test_malformed_shorturl_is_404_not_500(client, mocked, params):
+    resp = api(client, format="json", **params)
+    assert resp.status_code == 404
+    assert len(mocked.calls) == 0

@@ -263,10 +263,9 @@ def check_signature(params, now=None):
     timestamp = (params.get('timestamp') or '').strip()
     if not timestamp:
         return hmac.compare_digest(given.encode(), secret.encode())
-    try:
-        ts = int(timestamp)
-    except ValueError:
+    if not re.fullmatch(r'[0-9]{1,12}', timestamp):
         return False
+    ts = int(timestamp)
     now = time.time() if now is None else now
     if abs(now - ts) >= cfg().signature_ttl:
         return False
@@ -381,7 +380,10 @@ def shlink_lookup(short):
     short = (short or '').strip()
     domain = None
     if '://' in short:
-        parts = urlsplit(short)
+        try:
+            parts = urlsplit(short)
+        except ValueError:
+            raise ShlinkError(404, 'not-found', 'Error: could not find keyword')
         domain, short = parts.netloc, parts.path
     code = short.strip('/')
     if not code:

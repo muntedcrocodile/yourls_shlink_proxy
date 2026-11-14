@@ -191,3 +191,11 @@ def test_path_prefix_cannot_be_escaped(make_client, mocked, url, ok):
     client = make_client(ALLOWED_URL_PREFIXES="https://example.com/bin/")
     mocked.post(SHLINK_ENDPOINT, json=shlink_short_url())
     assert (client.get("/?link=" + quote(url, safe="")).status_code == 200) is ok
+
+
+@pytest.mark.parametrize("ts", ["1" + "0" * 400, "1_700_000_000", "+1700000000", "١٧٠٠٠٠٠٠٠٠", "-1"])
+def test_odd_timestamps_are_rejected_not_500(signed, ts):
+    # Regression: a 400-digit timestamp raised OverflowError -> HTML 500.
+    sig = hashlib.sha256((ts + SECRET).encode()).hexdigest()
+    resp = api(signed, action="version", format="json", timestamp=ts, signature=sig, hash="sha256")
+    assert resp.status_code == 403
