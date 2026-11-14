@@ -247,3 +247,20 @@ def test_malformed_shorturl_is_404_not_500(client, mocked, params):
     resp = api(client, format="json", **params)
     assert resp.status_code == 404
     assert len(mocked.calls) == 0
+
+
+@pytest.mark.parametrize("url", ["https://bin.example/?a\x01b", "https://bin.example/?a\x7fb",
+                                 "https://bin.example/?a\x00b"])
+def test_control_characters_in_url_rejected(client, mocked, url):
+    resp = api(client, action="shorturl", format="json", url=url)
+    assert resp.status_code == 400
+    assert len(mocked.calls) == 0
+
+
+def test_xml_output_stays_well_formed(client, mocked):
+    # Regression: a control character from Shlink (e.g. in a page title)
+    # produced XML that clients could not parse.
+    mocked.post(SHLINK_ENDPOINT, json={**shlink_short_url("abc12", PASTE), "title": "bad\x01\x1ftitle￾"})
+    resp = api(client, action="shorturl", url=PASTE)
+    root = ET.fromstring(resp.get_data())
+    assert root.findtext("title") == "bad��title�"

@@ -218,7 +218,8 @@ def validate_long_url(url):
         parts = urlsplit(url)
     except ValueError:
         raise ShlinkError(400, 'nourl', 'Missing or malformed URL')
-    if parts.scheme.lower() not in cfg().allowed_url_schemes or not parts.netloc or any(c.isspace() for c in url):
+    if (parts.scheme.lower() not in cfg().allowed_url_schemes or not parts.netloc
+            or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7f for c in url)):
         raise ShlinkError(400, 'nourl', 'Missing or malformed URL')
     prefixes = cfg().allowed_url_prefixes
     if prefixes and not any(_has_prefix(url, p) for p in prefixes):
@@ -449,6 +450,8 @@ YOURLS_VERSION = '1.9.2'   # version reported by action=version
 _KEYWORD_RE = re.compile(r'^[A-Za-z0-9_-]{1,100}$')
 _JSONP_CALLBACK_RE = re.compile(r'^[A-Za-z_$][0-9A-Za-z_$.\[\]]{0,99}$')
 _XML_NAME_RE = re.compile(r'[^A-Za-z0-9_.-]')
+# Characters not allowed in XML 1.0 documents (e.g. from a Shlink title).
+_XML_INVALID_RE = re.compile('[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff\ud800-\udfff]')
 
 
 def _api_error(status, message, **extra):
@@ -587,7 +590,7 @@ def _xml_encode(value, name='result'):
     elif isinstance(value, bool):
         inner = 'true' if value else 'false'
     else:
-        inner = xml_escape(str(value))
+        inner = xml_escape(_XML_INVALID_RE.sub('\ufffd', str(value)))
     return f'<{tag}>{inner}</{tag}>'
 
 
