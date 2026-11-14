@@ -1,5 +1,7 @@
 """Legacy `?link=` endpoint as used by PrivateBin's browser-side shortener button."""
 import json
+
+import responses
 from urllib.parse import quote
 
 from conftest import API_KEY, SHLINK_ENDPOINT, shlink_short_url
@@ -156,3 +158,21 @@ def test_surrounding_whitespace_is_trimmed(client, mocked):
     mocked.post(SHLINK_ENDPOINT, json=shlink_short_url())
     client.get("/?link=" + quote("  " + PASTE + "\n", safe=""))
     assert json.loads(mocked.calls[0].request.body)["longUrl"] == PASTE
+
+
+def test_paste_key_is_never_logged(client, mocked, caplog):
+    # Regression: logging.info(response_json) wrote the whole Shlink reply,
+    # including longUrl with the PrivateBin decryption key, to the logs.
+    import logging
+    import requests
+    caplog.set_level(logging.DEBUG)
+    mocked.post(SHLINK_ENDPOINT, json=shlink_short_url("abc12", PASTE))
+    client.get("/?link=" + quote(PASTE, safe=""))
+    mocked.replace(responses.POST, SHLINK_ENDPOINT, body=requests.ConnectionError(f"failed for {PASTE}"))
+    client.get("/?link=" + quote(PASTE, safe=""))
+    mocked.replace(responses.POST, SHLINK_ENDPOINT, status=400, json=_problem(
+        "invalid-url", 400, "Invalid URL", f"Provided URL {PASTE} is invalid"))
+    client.get("/?link=" + quote(PASTE, safe=""))
+    assert "abc12" in caplog.text
+    assert "Decrypt10nKey" not in caplog.text
+    assert API_KEY not in caplog.text

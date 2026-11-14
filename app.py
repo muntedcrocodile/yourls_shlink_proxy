@@ -116,7 +116,9 @@ def translate():
         # it finds and would present it as the "short" link.
         return _text(f'Error: {exc.detail}'.replace('://', ' '), exc.status)
 
-    logging.info(short)
+    # Log the short code only. The long URL of a PrivateBin paste carries the
+    # decryption key in its #fragment and must never reach the logs.
+    log.info('shortened: code=%s', short.get('shortCode'))
 
     # Return the shortUrl from the response
     return _text(short['shortUrl'])
