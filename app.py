@@ -7,7 +7,10 @@ import os
 import re
 from urllib.parse import quote, urlsplit
 from xml.sax.saxutils import escape as xml_escape
+import hashlib
+import hmac
 import json
+import time
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("yourls_shlink_proxy")
@@ -39,6 +42,17 @@ class Config:
     # Browser clients (PrivateBin >= 1.3.1 fetch()es the shortener from the
     # page) need CORS. '*' or a list of exact origins; empty disables CORS.
     cors_allow_origins: tuple = ('*',)
+    # Shared secret for the YOURLS API ("signature token"). When unset the API
+    # is open, as the original proxy was. Strongly recommended.
+    signature: str | None = None
+    signature_ttl: int = 43200          # YOURLS_NONCE_LIFE default (12h)
+    # Also require the signature on the legacy ?link= endpoint. Browser
+    # clients (PrivateBin's urlshortener) cannot keep a secret, so restrict
+    # those with allowed_url_prefixes instead.
+    link_requires_signature: bool = False
+    # Only URLs starting with one of these prefixes may be shortened, e.g.
+    # "https://bin.example.org/?". Empty = any http(s) URL.
+    allowed_url_prefixes: tuple = ()
 
     @property
     def short_urls_endpoint(self):
@@ -72,7 +86,22 @@ class Config:
         tags = tuple(t.strip() for t in env.get('SHLINK_TAGS', 'privatebin').split(',') if t.strip())
         cors = tuple(o.strip().rstrip('/') for o in
                      env.get('CORS_ALLOW_ORIGINS', '*').split(',') if o.strip())
+        prefixes = tuple(p.strip() for p in env.get('ALLOWED_URL_PREFIXES', '').split(',') if p.strip())
+        for prefix in prefixes:
+            pp = urlsplit(prefix)
+            if pp.scheme not in ('http', 'https') or not pp.netloc:
+                raise ConfigError(f'ALLOWED_URL_PREFIXES entries must be http(s) URLs, got {prefix!r}')
+        signature = (env.get('YOURLS_SIGNATURE') or '').strip() or None
+        if signature is not None and len(signature) < 16:
+            raise ConfigError('YOURLS_SIGNATURE must be at least 16 characters')
+        link_signed = _bool(env.get('LINK_REQUIRES_SIGNATURE'), False)
+        if link_signed and not signature:
+            raise ConfigError('LINK_REQUIRES_SIGNATURE needs YOURLS_SIGNATURE')
         return cls(
+            signature=signature,
+            signature_ttl=num('YOURLS_SIGNATURE_TTL', 43200, int),
+            link_requires_signature=link_signed,
+            allowed_url_prefixes=prefixes,
             cors_allow_origins=cors,
             max_visits=max_visits,
             tags=tags,
@@ -176,7 +205,64 @@ def validate_long_url(url):
         raise ShlinkError(400, 'nourl', 'Missing or malformed URL')
     if parts.scheme.lower() not in cfg().allowed_url_schemes or not parts.netloc or any(c.isspace() for c in url):
         raise ShlinkError(400, 'nourl', 'Missing or malformed URL')
+    prefixes = cfg().allowed_url_prefixes
+    if prefixes and not any(_has_prefix(url, p) for p in prefixes):
+        raise ShlinkError(400, 'forbidden-url', 'This URL may not be shortened here')
     return url
+
+
+def _has_prefix(url, prefix):
+    # Compare scheme and host case-insensitively, the rest exactly, and make
+    # sure "https://bin.example" does not match "https://bin.example.evil.com".
+    u, p = urlsplit(url), urlsplit(prefix)
+    if (u.scheme.lower(), u.netloc.lower()) != (p.scheme.lower(), p.netloc.lower()):
+        return False
+    rest = url.split(u.netloc, 1)[1]
+    prefix_rest = prefix.split(p.netloc, 1)[1]
+    return rest.startswith(prefix_rest)
+
+
+# ---- authentication -------------------------------------------------------
+
+_HASHES = {'md5': hashlib.md5, 'sha1': hashlib.sha1, 'sha256': hashlib.sha256,
+           'sha384': hashlib.sha384, 'sha512': hashlib.sha512}
+
+
+def check_signature(params, now=None):
+    """YOURLS passwordless API auth.
+
+    Accepts either `signature=<token>` or `timestamp=<unix>&signature=<hash>`
+    where hash = H(timestamp + token) or H(token + timestamp) and H is
+    `hash` (sha256 default as in YOURLS 1.9; md5 for older clients when the
+    signature is 32 hex chars and no `hash` is given).
+    """
+    secret = cfg().signature
+    given = (params.get('signature') or '').strip()
+    if not secret or not given:
+        return False
+    timestamp = (params.get('timestamp') or '').strip()
+    if not timestamp:
+        return hmac.compare_digest(given.encode(), secret.encode())
+    try:
+        ts = int(timestamp)
+    except ValueError:
+        return False
+    now = time.time() if now is None else now
+    if abs(now - ts) >= cfg().signature_ttl:
+        return False
+    algo = (params.get('hash') or '').strip().lower() or ('md5' if len(given) == 32 else 'sha256')
+    fn = _HASHES.get(algo)
+    if fn is None:
+        return False
+    given = given.lower()
+    return any(hmac.compare_digest(given, fn(m.encode()).hexdigest())
+               for m in (timestamp + secret, secret + timestamp))
+
+
+def _auth_error(params):
+    msg = 'Invalid username or password' if ('username' in params or 'password' in params) \
+        else 'Please log in'
+    return _api_error(403, msg)
 
 
 def _shlink_headers():
@@ -267,6 +353,8 @@ def translate():
     This is what PrivateBin's `urlshortener = "https://proxy/?link="` uses.
     """
     link = request.values.get('link')
+    if cfg().link_requires_signature and not check_signature(request.values):
+        return _text('Error: Please log in', 403)
 
     try:
         short = shlink_create(validate_long_url(link))
@@ -372,12 +460,50 @@ def api_version(params):
     return {'version': YOURLS_VERSION, 'simple': YOURLS_VERSION, 'statusCode': 200}
 
 
+def _totals():
+    page = shlink_call('GET', 'short-urls', params={'itemsPerPage': 1}, expect='shortUrls')
+    total_links = int(page['shortUrls'].get('pagination', {}).get('totalItems') or 0)
+    visits = shlink_call('GET', 'visits', expect='visits')['visits']
+    if 'nonOrphanVisits' in visits:
+        total_clicks = int(visits['nonOrphanVisits'].get('total') or 0)
+    else:                                           # Shlink < 3.5
+        total_clicks = int(visits.get('visitsCount') or 0)
+    return {'total_links': total_links, 'total_clicks': total_clicks}
+
+
+def api_db_stats(params):
+    return {'db-stats': _totals(), 'statusCode': 200, 'message': 'success'}
+
+
+_STATS_ORDER = {'top': 'visits-DESC', 'bottom': 'visits-ASC', 'last': 'dateCreated-DESC',
+                'rand': 'dateCreated-DESC'}
+
+
+def api_stats(params):
+    filt = (params.get('filter') or 'top').lower()
+    if filt not in _STATS_ORDER:
+        filt = 'top'
+    try:
+        limit = max(1, min(int(params.get('limit') or 10), 100))
+    except ValueError:
+        limit = 10
+    page = shlink_call('GET', 'short-urls', expect='shortUrls',
+                       params={'itemsPerPage': limit, 'orderBy': _STATS_ORDER[filt]})
+    links = {f'link_{i}': _link_record(s) for i, s in enumerate(page['shortUrls'].get('data', []), 1)}
+    return {'links': links, 'stats': _totals(), 'statusCode': 200, 'message': 'success'}
+
+
 API_ACTIONS = {
     'shorturl': api_shorturl,
     'expand': api_expand,
     'url-stats': api_url_stats,
     'version': api_version,
+    'db-stats': api_db_stats,
+    'stats': api_stats,
 }
+# These list every stored long URL (PrivateBin URLs include decryption keys),
+# so they are only served when API authentication is configured.
+PRIVATE_ACTIONS = {'stats', 'db-stats'}
 
 
 def _xml_encode(value, name='result'):
@@ -427,7 +553,12 @@ def yourls_api():
     action = (params.get('action') or '').strip()
     handler = API_ACTIONS.get(action)
     try:
-        if handler is None:
+        if cfg().signature and not check_signature(params):
+            log.warning('api %s: authentication failed', action or '-')
+            result = _auth_error(params)
+        elif action in PRIVATE_ACTIONS and not cfg().signature:
+            result = _api_error(403, f'Action "{action}" requires YOURLS_SIGNATURE to be configured')
+        elif handler is None:
             result = _api_error(400, 'Unknown or missing "action" parameter')
         else:
             result = handler(params)
@@ -473,6 +604,9 @@ def create_app(config=None):
     app.add_url_rule('/yourls-api.php', 'yourls_api', yourls_api, methods=['GET', 'POST'])
     app.after_request(add_cors_headers)
     log.info('proxying to Shlink %s (API v%s)', config.shlink_base, config.shlink_api_version)
+    if not config.signature and not config.allowed_url_prefixes:
+        log.warning('neither YOURLS_SIGNATURE nor ALLOWED_URL_PREFIXES is set: anyone who can '
+                    'reach this proxy can create short URLs for arbitrary sites')
     return app
 
 
