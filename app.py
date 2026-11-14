@@ -1,4 +1,4 @@
-from flask import Flask, request
+from flask import Flask, request, Response
 import requests
 import logging
 import os
@@ -6,10 +6,69 @@ import os
 app = Flask(__name__)
 
 logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("yourls_shlink_proxy")
 
 # Shlink API details
 SHLINK_URL = os.environ.get('SHLINK_URL')
 SHLINK_API_KEY = os.environ.get('SHLINK_API_KEY')
+
+
+class ShlinkError(Exception):
+    """Shlink could not create/return a short URL.
+
+    `status` is the HTTP status the proxy should answer with, `kind` the
+    Shlink problem type (last path segment, lower-cased, e.g. "non-unique-slug"),
+    `detail` a human readable message that is safe to show to the client.
+    """
+
+    def __init__(self, status, kind, detail):
+        super().__init__(detail)
+        self.status = status
+        self.kind = kind
+        self.detail = detail
+
+
+def _problem_kind(problem):
+    raw = str(problem.get('type') or '')
+    return raw.rstrip('/').rsplit('/', 1)[-1].lower().replace('_', '-')
+
+
+def _parse_shlink_response(response):
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if response.ok and isinstance(data, dict) and data.get('shortUrl'):
+        return data
+    if not isinstance(data, dict):
+        raise ShlinkError(502, 'bad-response',
+                          f'Unexpected response from Shlink (HTTP {response.status_code})')
+    kind = _problem_kind(data)
+    if response.status_code in (401, 403):
+        # Don't leak whether/which key is configured; this is an operator problem.
+        raise ShlinkError(502, kind or 'invalid-api-key', 'Proxy is not authorised against Shlink')
+    detail = data.get('detail') or data.get('title') or f'Shlink returned HTTP {response.status_code}'
+    status = 400 if response.status_code in (400, 422) else 502
+    raise ShlinkError(status, kind or 'error', str(detail))
+
+
+def shlink_create(long_url):
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Api-Key': SHLINK_API_KEY,
+    }
+    request_body = {
+        'longUrl': long_url,
+        'maxVisits': 100,
+        'tags': ['PrivateBin'],
+        'crawlable': False,
+    }
+    response = requests.post(SHLINK_URL, json=request_body, headers=headers)
+    return _parse_shlink_response(response)
+
+
+def _text(body, status=200):
+    return Response(body, status=status, mimetype='text/plain')
 
 
 @app.route("/", methods=["GET"])
@@ -17,29 +76,18 @@ def translate():
 
     link = request.args.get('link')
 
-    # Add the Shlink API key to the headers
-    headers = {
-        'Content-Type': 'application/json',
-        'X-Api-Key': SHLINK_API_KEY
-    }
-    
-    request_body = {
-        'longUrl': link,
-        'maxVisits': 100,
-        'tags': ['PrivateBin'],
-        'crawlable': False
-    }
+    try:
+        short = shlink_create(link)
+    except ShlinkError as exc:
+        log.warning('shorten failed: status=%s kind=%s', exc.status, exc.kind)
+        # Never put a URL in an error body: PrivateBin extracts the first URL
+        # it finds and would present it as the "short" link.
+        return _text(f'Error: {exc.detail}'.replace('://', ' '), exc.status)
 
-    # Make the POST request to Shlink
-    response = requests.post(SHLINK_URL, json=request_body, headers=headers)
-    
-    # Convert the response to JSON
-    response_json = response.json()
+    logging.info(short)
 
-    logging.info(response_json)
-    
     # Return the shortUrl from the response
-    return response_json['shortUrl']
+    return _text(short['shortUrl'])
 
 
 if __name__ == '__main__':

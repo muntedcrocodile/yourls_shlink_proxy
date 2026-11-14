@@ -22,3 +22,61 @@ def test_link_sends_api_key_and_full_url_including_fragment(client, mocked):
     body = json.loads(sent.body)
     assert body["longUrl"] == PASTE
     assert body["crawlable"] is False
+
+
+def _problem(kind, status, title, detail, **extra):
+    return {"type": f"https://shlink.io/api/error/{kind}", "status": status,
+            "title": title, "detail": detail, **extra}
+
+
+def test_shlink_validation_error_is_400_not_500(client, mocked):
+    # Regression: response_json['shortUrl'] raised KeyError -> HTML 500 page.
+    mocked.post(SHLINK_ENDPOINT, status=400, json=_problem(
+        "invalid-data", 400, "Invalid data", "Provided data is not valid", invalidElements=["longUrl"]))
+    resp = client.get("/?link=" + quote(PASTE, safe=""))
+    assert resp.status_code == 400
+    assert resp.mimetype == "text/plain"
+    assert "Provided data is not valid" in resp.get_data(as_text=True)
+
+
+def test_error_body_never_contains_a_url(client, mocked):
+    # PrivateBin picks the shortest http(s):// URL out of *any* response body,
+    # so an error message that echoes a URL would be shown as the short link.
+    mocked.post(SHLINK_ENDPOINT, status=400, json=_problem(
+        "invalid-url", 400, "Invalid URL", f"Provided URL {PASTE} is invalid"))
+    resp = client.get("/?link=" + quote(PASTE, safe=""))
+    assert resp.status_code == 400
+    assert "http://" not in resp.get_data(as_text=True)
+    assert "https://" not in resp.get_data(as_text=True)
+
+
+def test_slug_conflict_is_reported_not_fabricated(client, mocked):
+    # Regression for the deployed (uncommitted) variant, which on any Shlink
+    # 400 fabricated "<SHLINK host>/<slug>" -- a link that may not exist or may
+    # point at somebody else's paste.
+    mocked.post(SHLINK_ENDPOINT, status=400, json=_problem(
+        "non-unique-slug", 400, "Invalid custom slug", 'Provided slug "abc" is already in use.', customSlug="abc"))
+    resp = client.get("/?link=" + quote(PASTE, safe=""))
+    assert resp.status_code == 400
+    assert "https://" not in resp.get_data(as_text=True)
+
+
+def test_v2_style_error_codes_are_understood(client, mocked):
+    mocked.post(SHLINK_ENDPOINT, status=400, json={"type": "INVALID_ARGUMENT", "status": 400,
+                                                   "title": "Invalid data", "detail": "Provided data is not valid"})
+    resp = client.get("/?link=" + quote(PASTE, safe=""))
+    assert resp.status_code == 400
+
+
+def test_invalid_api_key_is_502_and_hides_details(client, mocked):
+    mocked.post(SHLINK_ENDPOINT, status=401, json=_problem(
+        "invalid-api-key", 401, "Invalid API key", "Provided API key does not exist or is invalid."))
+    resp = client.get("/?link=" + quote(PASTE, safe=""))
+    assert resp.status_code == 502
+    assert API_KEY not in resp.get_data(as_text=True)
+
+
+def test_non_json_upstream_response_is_502(client, mocked):
+    mocked.post(SHLINK_ENDPOINT, status=502, body="<html>Bad Gateway</html>", content_type="text/html")
+    resp = client.get("/?link=" + quote(PASTE, safe=""))
+    assert resp.status_code == 502
