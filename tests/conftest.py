@@ -3,7 +3,8 @@ import responses
 
 import app as app_module
 
-SHLINK_ENDPOINT = "https://shlink.test/rest/v3/short-urls"
+SHLINK_BASE = "https://shlink.test"
+SHLINK_ENDPOINT = SHLINK_BASE + "/rest/v3/short-urls"
 API_KEY = "test-api-key-0000"
 
 
@@ -13,12 +14,22 @@ def mocked():
         yield rsps
 
 
+def make_config(**overrides):
+    env = {"SHLINK_URL": SHLINK_BASE, "SHLINK_API_KEY": API_KEY}
+    env.update(overrides)
+    return app_module.Config.from_env(env)
+
+
 @pytest.fixture
-def client(monkeypatch):
-    monkeypatch.setattr(app_module, "SHLINK_URL", SHLINK_ENDPOINT)
-    monkeypatch.setattr(app_module, "SHLINK_API_KEY", API_KEY)
-    app_module.app.config.update(TESTING=False)
-    return app_module.app.test_client()
+def make_client():
+    def factory(**env):
+        return app_module.create_app(make_config(**env)).test_client()
+    return factory
+
+
+@pytest.fixture
+def client(make_client):
+    return make_client()
 
 
 def shlink_short_url(code="abc12", long_url="https://bin.example/?x#key"):
