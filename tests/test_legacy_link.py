@@ -176,3 +176,26 @@ def test_paste_key_is_never_logged(client, mocked, caplog):
     assert "abc12" in caplog.text
     assert "Decrypt10nKey" not in caplog.text
     assert API_KEY not in caplog.text
+
+
+def test_short_urls_are_not_limited_to_100_visits_by_default(client, mocked):
+    # Regression: maxVisits was hard-coded to 100, so every short link
+    # silently started returning 404 after its 100th visit (bots included).
+    mocked.post(SHLINK_ENDPOINT, json=shlink_short_url())
+    client.get("/?link=" + quote(PASTE, safe=""))
+    body = json.loads(mocked.calls[0].request.body)
+    assert "maxVisits" not in body
+    assert body["tags"] == ["privatebin"]
+    assert "domain" not in body
+
+
+def test_short_url_options_are_configurable(make_client, mocked):
+    client = make_client(SHLINK_MAX_VISITS="100", SHLINK_TAGS="PrivateBin, paste",
+                         SHLINK_DOMAIN="s.example", SHLINK_CRAWLABLE="true")
+    mocked.post(SHLINK_ENDPOINT, json=shlink_short_url())
+    client.get("/?link=" + quote(PASTE, safe=""))
+    body = json.loads(mocked.calls[0].request.body)
+    assert body["maxVisits"] == 100
+    assert body["tags"] == ["PrivateBin", "paste"]
+    assert body["domain"] == "s.example"
+    assert body["crawlable"] is True

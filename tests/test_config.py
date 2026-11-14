@@ -60,3 +60,10 @@ def test_gunicorn_app_attribute_builds_from_env(monkeypatch):
     flask_app = app_module.app
     assert flask_app.config["PROXY"].short_urls_endpoint == "https://s.example/rest/v2/short-urls"
     monkeypatch.delitem(app_module.__dict__, "app")
+
+
+@pytest.mark.parametrize("env", [{"SHLINK_MAX_VISITS": "0"}, {"SHLINK_MAX_VISITS": "x"},
+                                 {"SHLINK_CRAWLABLE": "maybe"}])
+def test_invalid_short_url_options(env):
+    with pytest.raises(ConfigError):
+        Config.from_env({**BASE_ENV, "SHLINK_URL": "https://s.example", **env})

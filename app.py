@@ -28,6 +28,11 @@ class Config:
     # Shlink happily stores javascript:, data:, file: ... URLs; only forward these.
     allowed_url_schemes: frozenset = frozenset({'http', 'https'})
     max_url_length: int = 8192
+    # Options for created short URLs. max_visits=None means unlimited.
+    max_visits: int | None = None
+    tags: tuple = ('privatebin',)
+    domain: str | None = None
+    crawlable: bool = False
 
     @property
     def short_urls_endpoint(self):
@@ -55,7 +60,15 @@ class Config:
             raise ConfigError('SHLINK_TIMEOUT must be > 0')
         schemes = frozenset(s.strip().lower() for s in
                             env.get('cfg().allowed_url_schemes', 'http,https').split(',') if s.strip())
+        max_visits = num('SHLINK_MAX_VISITS', None, int)
+        if max_visits is not None and max_visits < 1:
+            raise ConfigError('SHLINK_MAX_VISITS must be >= 1 (leave empty for unlimited)')
+        tags = tuple(t.strip() for t in env.get('SHLINK_TAGS', 'privatebin').split(',') if t.strip())
         return cls(
+            max_visits=max_visits,
+            tags=tags,
+            domain=(env.get('SHLINK_DOMAIN') or '').strip() or None,
+            crawlable=_bool(env.get('SHLINK_CRAWLABLE'), False),
             shlink_base=base,
             shlink_api_key=key,
             shlink_api_version=version,
@@ -63,6 +76,17 @@ class Config:
             allowed_url_schemes=schemes,
             max_url_length=num('cfg().max_url_length', 8192, int),
         )
+
+
+def _bool(raw, default):
+    if raw is None or raw.strip() == '':
+        return default
+    v = raw.strip().lower()
+    if v in ('1', 'true', 'yes', 'on'):
+        return True
+    if v in ('0', 'false', 'no', 'off'):
+        return False
+    raise ConfigError(f'expected a boolean, got {raw!r}')
 
 
 def parse_shlink_url(url, version=None):
@@ -155,12 +179,16 @@ def _shlink_headers():
 
 def shlink_create(long_url):
     headers = _shlink_headers()
+    c = cfg()
     request_body = {
         'longUrl': long_url,
-        'maxVisits': 100,
-        'tags': ['PrivateBin'],
-        'crawlable': False,
+        'tags': list(c.tags),
+        'crawlable': c.crawlable,
     }
+    if c.max_visits is not None:
+        request_body['maxVisits'] = c.max_visits
+    if c.domain:
+        request_body['domain'] = c.domain
     try:
         response = requests.post(cfg().short_urls_endpoint, json=request_body,
                                  headers=headers, timeout=cfg().shlink_timeout)
