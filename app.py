@@ -82,7 +82,7 @@ class Config:
         if timeout <= 0:
             raise ConfigError('SHLINK_TIMEOUT must be > 0')
         schemes = frozenset(s.strip().lower() for s in
-                            env.get('cfg().allowed_url_schemes', 'http,https').split(',') if s.strip())
+                            env.get('ALLOWED_URL_SCHEMES', 'http,https').split(',') if s.strip())
         max_visits = num('SHLINK_MAX_VISITS', None, int)
         if max_visits is not None and max_visits < 1:
             raise ConfigError('SHLINK_MAX_VISITS must be >= 1 (leave empty for unlimited)')
@@ -100,9 +100,17 @@ class Config:
         link_signed = _bool(env.get('LINK_REQUIRES_SIGNATURE'), False)
         if link_signed and not signature:
             raise ConfigError('LINK_REQUIRES_SIGNATURE needs YOURLS_SIGNATURE')
+        ttl = num('YOURLS_SIGNATURE_TTL', 43200, int)
+        if ttl <= 0:
+            raise ConfigError('YOURLS_SIGNATURE_TTL must be > 0')
+        max_len = num('MAX_URL_LENGTH', 8192, int)
+        if max_len < 16:
+            raise ConfigError('MAX_URL_LENGTH must be >= 16')
+        if not schemes:
+            raise ConfigError('ALLOWED_URL_SCHEMES must list at least one scheme')
         return cls(
             signature=signature,
-            signature_ttl=num('YOURLS_SIGNATURE_TTL', 43200, int),
+            signature_ttl=ttl,
             link_requires_signature=link_signed,
             allowed_url_prefixes=prefixes,
             cors_allow_origins=cors,
@@ -116,7 +124,7 @@ class Config:
             shlink_api_version=version,
             shlink_timeout=timeout,
             allowed_url_schemes=schemes,
-            max_url_length=num('cfg().max_url_length', 8192, int),
+            max_url_length=max_len,
         )
 
 
@@ -142,6 +150,9 @@ def parse_shlink_url(url, version=None):
         raise ConfigError(f'SHLINK_URL must be an http(s) URL, got {url!r}')
     if parts.query or parts.fragment:
         raise ConfigError('SHLINK_URL must not contain a query string or fragment')
+    if '@' in parts.netloc:
+        # Would end up in the startup log; Shlink authenticates with the API key.
+        raise ConfigError('SHLINK_URL must not contain credentials')
     path = parts.path.rstrip('/')
     m = _ENDPOINT_RE.match(path)
     if m:

@@ -67,3 +67,31 @@ def test_gunicorn_app_attribute_builds_from_env(monkeypatch):
 def test_invalid_short_url_options(env):
     with pytest.raises(ConfigError):
         Config.from_env({**BASE_ENV, "SHLINK_URL": "https://s.example", **env})
+
+
+def test_scheme_and_length_settings_are_read():
+    # Regression: a refactor read the literal keys 'cfg().allowed_url_schemes'
+    # and 'cfg().max_url_length', silently ignoring the documented variables.
+    c = Config.from_env({**BASE_ENV, "SHLINK_URL": "https://s.example",
+                         "ALLOWED_URL_SCHEMES": "https", "MAX_URL_LENGTH": "100"})
+    assert c.allowed_url_schemes == frozenset({"https"})
+    assert c.max_url_length == 100
+
+
+def test_scheme_and_length_settings_are_enforced(make_client, mocked):
+    client = make_client(ALLOWED_URL_SCHEMES="https", MAX_URL_LENGTH="40")
+    assert client.get("/?link=http%3A%2F%2Fbin.example%2F%3Fa").status_code == 400
+    assert client.get("/?link=https%3A%2F%2Fbin.example%2F%3F" + "a" * 40).status_code == 400
+    assert len(mocked.calls) == 0
+
+
+@pytest.mark.parametrize("env, msg", [
+    ({"YOURLS_SIGNATURE": "x" * 16, "YOURLS_SIGNATURE_TTL": "0"}, "YOURLS_SIGNATURE_TTL"),
+    ({"YOURLS_SIGNATURE": "x" * 16, "YOURLS_SIGNATURE_TTL": "-5"}, "YOURLS_SIGNATURE_TTL"),
+    ({"MAX_URL_LENGTH": "0"}, "MAX_URL_LENGTH"),
+    ({"ALLOWED_URL_SCHEMES": " , "}, "ALLOWED_URL_SCHEMES"),
+    ({"SHLINK_URL": "https://user:pw@s.example"}, "credentials"),
+])
+def test_more_invalid_settings(env, msg):
+    with pytest.raises(ConfigError, match=msg):
+        Config.from_env({**BASE_ENV, "SHLINK_URL": "https://s.example", **env})
