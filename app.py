@@ -6,6 +6,7 @@ import logging
 import os
 import re
 from urllib.parse import quote, unquote, urlsplit
+from werkzeug.datastructures import CombinedMultiDict
 from xml.sax.saxutils import escape as xml_escape
 import hashlib
 import hmac
@@ -421,8 +422,9 @@ def translate():
 
     This is what PrivateBin's `urlshortener = "https://proxy/?link="` uses.
     """
-    link = request.values.get('link')
-    if cfg().link_requires_signature and not check_signature(request.values):
+    params = request_params()
+    link = params.get('link')
+    if cfg().link_requires_signature and not check_signature(params):
         return _text('Error: Please log in', 403)
 
     try:
@@ -619,8 +621,13 @@ def api_output(fmt, result, callback=''):
     return Response('' if simple is None else str(simple), status=status, mimetype='text/plain')
 
 
+def request_params():
+    """Like PHP's $_REQUEST as YOURLS sees it: POST fields win over the query string."""
+    return CombinedMultiDict([request.form, request.args])
+
+
 def yourls_api():
-    params = request.values
+    params = request_params()
     action = (params.get('action') or '').strip()
     handler = API_ACTIONS.get(action)
     try:
@@ -654,7 +661,8 @@ def healthz():
 
 def index():
     # `/` serves both the legacy ?link= endpoint and the YOURLS API.
-    if 'action' not in request.values and 'link' in request.values:
+    params = request_params()
+    if 'action' not in params and 'link' in params:
         return translate()
     return yourls_api()
 

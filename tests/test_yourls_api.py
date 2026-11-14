@@ -264,3 +264,20 @@ def test_xml_output_stays_well_formed(client, mocked):
     resp = api(client, action="shorturl", url=PASTE)
     root = ET.fromstring(resp.get_data())
     assert root.findtext("title") == "bad��title�"
+
+
+def test_post_fields_override_query_string(client, mocked):
+    # YOURLS reads PHP's $_REQUEST, where POST wins over GET. Regression:
+    # request.values preferred the query string, e.g. a PrivateBin apiurl
+    # containing ?format=xml overrode its POSTed format=json.
+    mocked.post(SHLINK_ENDPOINT, json=shlink_short_url("abc12", PASTE))
+    resp = client.post("/yourls-api.php?format=xml&url=https%3A%2F%2Fevil.example%2F",
+                       data={"action": "shorturl", "format": "json", "url": PASTE})
+    assert resp.mimetype == "application/json"
+    assert json.loads(mocked.calls[0].request.body)["longUrl"] == PASTE
+
+
+def test_query_string_still_used_when_not_posted(client, mocked):
+    mocked.post(SHLINK_ENDPOINT, json=shlink_short_url("abc12", PASTE))
+    resp = client.post("/yourls-api.php?format=json&action=shorturl", data={"url": PASTE})
+    assert resp.get_json()["shorturl"] == "https://s.example/abc12"
