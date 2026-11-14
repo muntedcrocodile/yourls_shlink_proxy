@@ -30,7 +30,7 @@ Differences from real YOURLS:
 | `SHLINK_URL` | *required* | Shlink base URL (`http://shlink:8080`) **or** the full `…/rest/vN/short-urls` endpoint. On the same Docker network, use the internal address. |
 | `SHLINK_API_KEY` | *required* | |
 | `SHLINK_API_VERSION` | from URL, else `3` | Shlink 3–5 serve v1–v3. |
-| `SHLINK_TIMEOUT` | `8` | Seconds. Keep this below PrivateBin's 10 s client timeout. |
+| `SHLINK_TIMEOUT` | `5` | Seconds, total for each client request (all Shlink calls together). A single stalled read can overrun by up to this much again, so keep it at or below half of PrivateBin's 10 s client timeout. |
 | `ALLOWED_URL_PREFIXES` | *(any)* | Comma-separated. Only these URLs can be shortened, e.g. `https://bin.example.org/?`. **Recommended:** the `?link=` endpoint is called from browsers, so it can't hold a secret. |
 | `YOURLS_SIGNATURE` | *(open)* | YOURLS signature token, at least 16 characters. It's required on every API action: `signature=<token>`, or `timestamp=<unix>&signature=<sha256(timestamp+token)>` with optional `hash=sha512` etc. Use it with PrivateBin's server-side `[yourls]` section. |
 | `YOURLS_SIGNATURE_TTL` | `43200` | Validity window for timestamped signatures. |

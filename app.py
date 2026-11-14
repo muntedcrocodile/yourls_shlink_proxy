@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from flask import Flask, current_app, request, Response
+from flask import Flask, Response, current_app, g, request
 import requests
 import logging
 import os
@@ -30,7 +30,7 @@ class Config:
     shlink_api_version: str = '3'
     # Seconds to wait for Shlink. Keep below PrivateBin's 10s client-side abort and
     # gunicorn's worker timeout so the client gets a clean error, not a dropped socket.
-    shlink_timeout: float = 8.0
+    shlink_timeout: float = 5.0
     # Shlink happily stores javascript:, data:, file: ... URLs; only forward these.
     allowed_url_schemes: frozenset = frozenset({'http', 'https'})
     max_url_length: int = 8192
@@ -78,7 +78,7 @@ class Config:
             except ValueError:
                 raise ConfigError(f'{name} must be a number, got {raw!r}')
 
-        timeout = num('SHLINK_TIMEOUT', 8.0, float)
+        timeout = num('SHLINK_TIMEOUT', 5.0, float)
         if timeout <= 0:
             raise ConfigError('SHLINK_TIMEOUT must be > 0')
         schemes = frozenset(s.strip().lower() for s in
@@ -188,9 +188,9 @@ def _problem_kind(problem):
     return raw.rstrip('/').rsplit('/', 1)[-1].lower().replace('_', '-')
 
 
-def _parse_shlink_response(response, expect=None):
+def _parse_shlink_response(response, body, expect=None):
     try:
-        data = response.json()
+        data = json.loads(body)
     except ValueError:
         data = None
     if response.ok and isinstance(data, dict) and (expect is None or data.get(expect)):
@@ -295,16 +295,39 @@ def shlink_call(method, path, *, expect=None, **kwargs):
     """
     c = cfg()
     url = f'{c.shlink_base}/rest/v{c.shlink_api_version}/{path}'
+    # SHLINK_TIMEOUT is a budget for the whole client request, shared by all
+    # Shlink calls it makes. requests' own timeout is per socket operation,
+    # so a slow-dripping upstream could otherwise exceed it many times over.
+    deadline = g.setdefault('shlink_deadline', time.monotonic() + c.shlink_timeout)
+    timed_out = ShlinkError(504, 'timeout', 'Timed out waiting for Shlink')
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise timed_out
     try:
-        response = requests.request(method, url, headers=_shlink_headers(),
-                                    timeout=c.shlink_timeout, **kwargs)
+        with requests.request(method, url, headers=_shlink_headers(), timeout=remaining,
+                              stream=True, **kwargs) as response:
+            body = bytearray()
+            while True:
+                # read1() returns whatever has arrived instead of waiting for
+                # a full buffer, so the deadline is checked between reads.
+                chunk = response.raw.read1(16384, decode_content=True)
+                if not chunk:
+                    break
+                body += chunk
+                if time.monotonic() > deadline:
+                    raise timed_out
+                if len(body) > MAX_SHLINK_RESPONSE:
+                    raise ShlinkError(502, 'bad-response', 'Response from Shlink is too large')
     except requests.Timeout:
-        raise ShlinkError(504, 'timeout', 'Timed out waiting for Shlink')
+        raise timed_out
     except requests.RequestException as exc:
         # Log the exception class only: the message can include the URL.
         log.error('cannot reach Shlink: %s', type(exc).__name__)
         raise ShlinkError(502, 'unreachable', 'Cannot reach Shlink')
-    return _parse_shlink_response(response, expect)
+    return _parse_shlink_response(response, bytes(body), expect)
+
+
+MAX_SHLINK_RESPONSE = 2 * 1024 * 1024
 
 
 def shlink_create(long_url, slug=None, title=None):
