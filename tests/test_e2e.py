@@ -222,6 +222,8 @@ def test_docker_image(shlink):
         logs = docker("logs", name).stdout + docker("logs", name).stderr
         assert "Decrypt10nKey" not in logs and API_KEY not in logs
         assert '"GET /"' in logs        # access log, without the query string
+        # Read-only root filesystem: nothing may try to write outside /dev/shm.
+        assert "Read-only file system" not in logs and "Errno 30" not in logs
     finally:
         docker("rm", "-f", name, check=False)
         docker("rmi", "-f", tag, check=False)

@@ -24,4 +24,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 # The access log records the path only (%(U)s), never the query string: a
 # PrivateBin ?link= query carries the paste's decryption key.
-CMD ["sh", "-c", "exec gunicorn --bind 0.0.0.0:8080 --workers \"${WEB_CONCURRENCY:-2}\" --timeout 30 --worker-tmp-dir /dev/shm --error-logfile - --access-logfile - --access-logformat '%(h)s \"%(m)s %(U)s\" %(s)s %(B)s %(M)sms' 'app:create_app()'"]
+# gunicorn 27's control socket is disabled: it is unused and would try
+# to write to $HOME on the read-only root filesystem.
+CMD ["sh", "-c", "exec gunicorn --bind 0.0.0.0:8080 --workers \"${WEB_CONCURRENCY:-2}\" --timeout 30 --worker-tmp-dir /dev/shm --no-control-socket --error-logfile - --access-logfile - --access-logformat '%(h)s \"%(m)s %(U)s\" %(s)s %(B)s %(M)sms' 'app:create_app()'"]
