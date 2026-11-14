@@ -105,11 +105,11 @@ def test_upstream_request_has_a_timeout(client, monkeypatch):
     import app as app_module
     seen = {}
 
-    def fake_post(url, **kwargs):
+    def fake_request(method, url, **kwargs):
         seen.update(kwargs)
         raise app_module.requests.ConnectionError()
 
-    monkeypatch.setattr(app_module.requests, "post", fake_post)
+    monkeypatch.setattr(app_module.requests, "request", fake_request)
     client.get("/?link=" + quote(PASTE, safe=""))
     assert 0 < seen["timeout"] < 10
 

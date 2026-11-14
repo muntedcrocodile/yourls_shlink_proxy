@@ -1,10 +1,13 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime
 from flask import Flask, current_app, request, Response
 import requests
 import logging
 import os
 import re
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
+from xml.sax.saxutils import escape as xml_escape
+import json
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("yourls_shlink_proxy")
@@ -141,12 +144,12 @@ def _problem_kind(problem):
     return raw.rstrip('/').rsplit('/', 1)[-1].lower().replace('_', '-')
 
 
-def _parse_shlink_response(response):
+def _parse_shlink_response(response, expect=None):
     try:
         data = response.json()
     except ValueError:
         data = None
-    if response.ok and isinstance(data, dict) and data.get('shortUrl'):
+    if response.ok and isinstance(data, dict) and (expect is None or data.get(expect)):
         return data
     if not isinstance(data, dict):
         raise ShlinkError(502, 'bad-response',
@@ -183,8 +186,27 @@ def _shlink_headers():
     }
 
 
-def shlink_create(long_url):
-    headers = _shlink_headers()
+def shlink_call(method, path, *, expect=None, **kwargs):
+    """Call the Shlink REST API and return the decoded JSON body.
+
+    Raises ShlinkError for transport errors and Shlink problem responses.
+    `expect` names a key that must be present in a successful response.
+    """
+    c = cfg()
+    url = f'{c.shlink_base}/rest/v{c.shlink_api_version}/{path}'
+    try:
+        response = requests.request(method, url, headers=_shlink_headers(),
+                                    timeout=c.shlink_timeout, **kwargs)
+    except requests.Timeout:
+        raise ShlinkError(504, 'timeout', 'Timed out waiting for Shlink')
+    except requests.RequestException as exc:
+        # Log the exception class only: the message can include the URL.
+        log.error('cannot reach Shlink: %s', type(exc).__name__)
+        raise ShlinkError(502, 'unreachable', 'Cannot reach Shlink')
+    return _parse_shlink_response(response, expect)
+
+
+def shlink_create(long_url, slug=None, title=None):
     c = cfg()
     request_body = {
         'longUrl': long_url,
@@ -195,16 +217,44 @@ def shlink_create(long_url):
         request_body['maxVisits'] = c.max_visits
     if c.domain:
         request_body['domain'] = c.domain
+    if slug:
+        request_body['customSlug'] = slug
+    if title:
+        request_body['title'] = title
+    return shlink_call('POST', 'short-urls', json=request_body, expect='shortUrl')
+
+
+def shlink_lookup(short):
+    """Resolve a keyword or full short URL to Shlink's short URL record."""
+    short = (short or '').strip()
+    domain = None
+    if '://' in short:
+        parts = urlsplit(short)
+        domain, short = parts.netloc, parts.path
+    code = short.strip('/')
+    if not code:
+        raise ShlinkError(404, 'not-found', 'Error: could not find keyword')
+    params = {'domain': domain} if domain else None
     try:
-        response = requests.post(cfg().short_urls_endpoint, json=request_body,
-                                 headers=headers, timeout=cfg().shlink_timeout)
-    except requests.Timeout:
-        raise ShlinkError(504, 'timeout', 'Timed out waiting for Shlink')
-    except requests.RequestException as exc:
-        # Log the exception class only: the message can include the URL.
-        log.error('cannot reach Shlink: %s', type(exc).__name__)
-        raise ShlinkError(502, 'unreachable', 'Cannot reach Shlink')
-    return _parse_shlink_response(response)
+        return shlink_call('GET', 'short-urls/' + quote(code, safe=''), params=params, expect='shortUrl')
+    except ShlinkError as exc:
+        if exc.status == 400 or exc.kind in ('short-url-not-found', 'invalid-shortcode'):
+            raise ShlinkError(404, 'not-found', 'Error: could not find keyword')
+        raise
+
+
+def _visits(short):
+    summary = short.get('visitsSummary')
+    if isinstance(summary, dict):
+        return int(summary.get('total') or 0)
+    return int(short.get('visitsCount') or 0)   # Shlink < 3.4
+
+
+def _yourls_date(iso):
+    try:
+        return datetime.fromisoformat(iso).strftime('%Y-%m-%d %H:%M:%S')
+    except (TypeError, ValueError):
+        return iso or ''
 
 
 def _text(body, status=200):
@@ -212,8 +262,11 @@ def _text(body, status=200):
 
 
 def translate():
+    """Legacy endpoint: GET /?link=<url> -> short URL as text/plain.
 
-    link = request.args.get('link')
+    This is what PrivateBin's `urlshortener = "https://proxy/?link="` uses.
+    """
+    link = request.values.get('link')
 
     try:
         short = shlink_create(validate_long_url(link))
@@ -229,6 +282,166 @@ def translate():
 
     # Return the shortUrl from the response
     return _text(short['shortUrl'])
+
+
+# --------------------------------------------------------------------------
+# YOURLS API emulation (yourls-api.php)
+# https://yourls.org/docs/development/api
+# --------------------------------------------------------------------------
+
+YOURLS_VERSION = '1.9.2'   # version reported by action=version
+_KEYWORD_RE = re.compile(r'^[A-Za-z0-9_-]{1,100}$')
+_JSONP_CALLBACK_RE = re.compile(r'^[A-Za-z_$][0-9A-Za-z_$.\[\]]{0,99}$')
+_XML_NAME_RE = re.compile(r'[^A-Za-z0-9_.-]')
+
+
+def _api_error(status, message, **extra):
+    return {'errorCode': str(status), 'message': message, 'simple': message,
+            'statusCode': status, **extra}
+
+
+def api_shorturl(params):
+    try:
+        url = validate_long_url(params.get('url'))
+    except ShlinkError as exc:
+        return {'status': 'fail', 'code': 'error:nourl', 'message': exc.detail,
+                'errorCode': '400', 'statusCode': 400, 'simple': ''}
+    keyword = (params.get('keyword') or '').strip()
+    title = (params.get('title') or '').strip() or None
+    if keyword and not _KEYWORD_RE.match(keyword):
+        return {'status': 'fail', 'code': 'error:keyword', 'statusCode': 400, 'errorCode': '400',
+                'message': 'Keywords may only contain letters, digits, "-" and "_"', 'simple': ''}
+    try:
+        short = shlink_create(url, slug=keyword or None, title=title)
+    except ShlinkError as exc:
+        if exc.kind in ('non-unique-slug', 'invalid-slug'):
+            # YOURLS reports a taken keyword as a failed but valid request.
+            msg = f'Short URL {keyword} already exists in database or is reserved'
+            return {'status': 'fail', 'code': 'error:keyword', 'message': msg,
+                    'statusCode': 200, 'simple': ''}
+        if exc.status == 400:
+            return {'status': 'fail', 'code': 'error:nourl', 'message': exc.detail,
+                    'errorCode': '400', 'statusCode': 400, 'simple': ''}
+        raise
+    log.info('shortened: code=%s', short.get('shortCode'))
+    record = {
+        'keyword': short.get('shortCode'),
+        'url': short.get('longUrl', url),
+        'title': short.get('title') or '',
+        'date': _yourls_date(short.get('dateCreated')),
+        'ip': '',
+    }
+    # The message deliberately does not echo the long URL (YOURLS does): browser
+    # clients such as PrivateBin pick the *shortest* URL found in the body.
+    return {'status': 'success', 'code': '', 'url': record,
+            'message': 'Short URL added to database', 'title': record['title'],
+            'shorturl': short['shortUrl'], 'statusCode': 200, 'simple': short['shortUrl']}
+
+
+def api_expand(params):
+    shorturl = params.get('shorturl')
+    try:
+        short = shlink_lookup(shorturl)
+    except ShlinkError as exc:
+        if exc.status == 404:
+            return _api_error(404, exc.detail, keyword=(shorturl or '').strip())
+        raise
+    return {'keyword': short.get('shortCode'), 'shorturl': short['shortUrl'],
+            'longurl': short.get('longUrl'), 'title': short.get('title') or '',
+            'simple': short.get('longUrl'), 'message': 'success', 'statusCode': 200}
+
+
+def _link_record(short):
+    return {'shorturl': short['shortUrl'], 'url': short.get('longUrl'),
+            'title': short.get('title') or '', 'timestamp': _yourls_date(short.get('dateCreated')),
+            'ip': '', 'clicks': _visits(short)}
+
+
+def api_url_stats(params):
+    shorturl = params.get('shorturl')
+    try:
+        short = shlink_lookup(shorturl)
+    except ShlinkError as exc:
+        if exc.status == 404:
+            return _api_error(404, exc.detail)
+        raise
+    return {'statusCode': 200, 'message': 'success', 'link': _link_record(short)}
+
+
+def api_version(params):
+    return {'version': YOURLS_VERSION, 'simple': YOURLS_VERSION, 'statusCode': 200}
+
+
+API_ACTIONS = {
+    'shorturl': api_shorturl,
+    'expand': api_expand,
+    'url-stats': api_url_stats,
+    'version': api_version,
+}
+
+
+def _xml_encode(value, name='result'):
+    tag = _XML_NAME_RE.sub('_', str(name)) or 'item'
+    if tag[0].isdigit() or tag[0] in '.-':
+        tag = 'item_' + tag
+    if isinstance(value, dict):
+        inner = ''.join(_xml_encode(v, k) for k, v in value.items())
+    elif isinstance(value, (list, tuple)):
+        inner = ''.join(_xml_encode(v, 'item') for v in value)
+    elif value is None:
+        inner = ''
+    elif isinstance(value, bool):
+        inner = 'true' if value else 'false'
+    else:
+        inner = xml_escape(str(value))
+    return f'<{tag}>{inner}</{tag}>'
+
+
+def api_output(fmt, result, callback=''):
+    """Render like yourls_api_output(): HTTP status from statusCode/errorCode."""
+    result = dict(result)
+    simple = result.pop('simple', '')
+    status = result.get('statusCode') or result.get('errorCode') or 200
+    try:
+        status = int(status)
+    except (TypeError, ValueError):
+        status = 200
+    fmt = (fmt or 'xml').lower()
+    if fmt == 'jsonp':
+        if not _JSONP_CALLBACK_RE.match(callback or ''):
+            err = _api_error(400, 'Invalid JSONP callback')
+            err.pop('simple')
+            return Response(json.dumps(err), status=400, mimetype='application/json')
+        return Response(f'/**/{callback}({json.dumps(result)});', status=status,
+                        mimetype='application/javascript')
+    if fmt == 'json':
+        return Response(json.dumps(result), status=status, mimetype='application/json')
+    if fmt == 'xml':
+        body = '<?xml version="1.0" encoding="UTF-8"?>\n' + _xml_encode(result)
+        return Response(body, status=status, mimetype='application/xml')
+    return Response('' if simple is None else str(simple), status=status, mimetype='text/plain')
+
+
+def yourls_api():
+    params = request.values
+    action = (params.get('action') or '').strip()
+    handler = API_ACTIONS.get(action)
+    try:
+        if handler is None:
+            result = _api_error(400, 'Unknown or missing "action" parameter')
+        else:
+            result = handler(params)
+    except ShlinkError as exc:
+        log.warning('api %s failed: status=%s kind=%s', action, exc.status, exc.kind)
+        result = _api_error(exc.status, exc.detail.replace('://', ' '))
+    return api_output(params.get('format'), result, params.get('callback', ''))
+
+
+def index():
+    # `/` serves both the legacy ?link= endpoint and the YOURLS API.
+    if 'action' not in request.values and 'link' in request.values:
+        return translate()
+    return yourls_api()
 
 
 def add_cors_headers(response):
@@ -256,7 +469,8 @@ def create_app(config=None):
     config = config or Config.from_env()
     app = Flask(__name__)
     app.config['PROXY'] = config
-    app.add_url_rule('/', 'translate', translate, methods=['GET'])
+    app.add_url_rule('/', 'index', index, methods=['GET', 'POST'])
+    app.add_url_rule('/yourls-api.php', 'yourls_api', yourls_api, methods=['GET', 'POST'])
     app.after_request(add_cors_headers)
     log.info('proxying to Shlink %s (API v%s)', config.shlink_base, config.shlink_api_version)
     return app
