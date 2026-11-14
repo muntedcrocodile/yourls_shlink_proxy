@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Flask, current_app, request, Response
 import requests
 import logging
@@ -39,6 +39,9 @@ class Config:
     tags: tuple = ('privatebin',)
     domain: str | None = None
     crawlable: bool = False
+    # Return the existing short URL when the same long URL was shortened before
+    # (Shlink findIfExists) instead of creating a new one every time.
+    find_if_exists: bool = True
     # Browser clients (PrivateBin >= 1.3.1 fetch()es the shortener from the
     # page) need CORS. '*' or a list of exact origins; empty disables CORS.
     cors_allow_origins: tuple = ('*',)
@@ -107,6 +110,7 @@ class Config:
             tags=tags,
             domain=(env.get('SHLINK_DOMAIN') or '').strip() or None,
             crawlable=_bool(env.get('SHLINK_CRAWLABLE'), False),
+            find_if_exists=_bool(env.get('SHLINK_FIND_IF_EXISTS'), True),
             shlink_base=base,
             shlink_api_key=key,
             shlink_api_version=version,
@@ -307,7 +311,30 @@ def shlink_create(long_url, slug=None, title=None):
         request_body['customSlug'] = slug
     if title:
         request_body['title'] = title
+    if c.find_if_exists and not slug:
+        # Shlink only reuses a short URL whose options all match this request.
+        short = shlink_call('POST', 'short-urls', json={**request_body, 'findIfExists': True},
+                            expect='shortUrl')
+        if not _exhausted(short):
+            return short
+        log.info('existing short URL %s is exhausted; creating a new one', short.get('shortCode'))
     return shlink_call('POST', 'short-urls', json=request_body, expect='shortUrl')
+
+
+def _exhausted(short):
+    """True if an existing short URL no longer redirects (max visits / expiry)."""
+    meta = short.get('meta') or {}
+    max_visits = meta.get('maxVisits')
+    if max_visits and _visits(short) >= int(max_visits):
+        return True
+    valid_until = meta.get('validUntil')
+    if valid_until:
+        try:
+            if datetime.fromisoformat(valid_until) <= datetime.now(timezone.utc):
+                return True
+        except ValueError:
+            pass
+    return False
 
 
 def shlink_lookup(short):
