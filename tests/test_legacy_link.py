@@ -110,3 +110,49 @@ def test_upstream_request_has_a_timeout(client, monkeypatch):
     monkeypatch.setattr(app_module.requests, "post", fake_post)
     client.get("/?link=" + quote(PASTE, safe=""))
     assert 0 < seen["timeout"] < 10
+
+
+import pytest
+
+
+@pytest.mark.parametrize("query", ["/", "/?link=", "/?link=%20%20"])
+def test_missing_link_is_400_without_calling_shlink(client, mocked, query):
+    resp = client.get(query)
+    assert resp.status_code == 400
+    assert len(mocked.calls) == 0
+
+
+@pytest.mark.parametrize("bad", [
+    "javascript:alert(document.cookie)",
+    "data:text/html,<script>alert(1)</script>",
+    "file:///etc/passwd",
+    "//no-scheme.example/x",
+    "not a url",
+    "https://",
+    "https://exa mple.com/",
+])
+def test_unsafe_or_malformed_urls_are_rejected(client, mocked, bad):
+    # Shlink 5.1.8 accepts javascript: URLs; the proxy must not forward them.
+    resp = client.get("/?link=" + quote(bad, safe=""))
+    assert resp.status_code == 400
+    assert len(mocked.calls) == 0
+
+
+def test_overlong_url_is_rejected(client, mocked):
+    resp = client.get("/?link=" + quote("https://bin.example/?" + "a" * 9000, safe=""))
+    assert resp.status_code == 400
+    assert len(mocked.calls) == 0
+
+
+def test_unicode_and_encoded_characters_survive_round_trip(client, mocked):
+    url = "https://例え.テスト/パス?q=ü&r=a%2Fb&s=1+2#Kéy/+="
+    mocked.post(SHLINK_ENDPOINT, json=shlink_short_url())
+    resp = client.get("/?link=" + quote(url, safe=""))
+    assert resp.status_code == 200
+    assert json.loads(mocked.calls[0].request.body)["longUrl"] == url
+
+
+def test_surrounding_whitespace_is_trimmed(client, mocked):
+    mocked.post(SHLINK_ENDPOINT, json=shlink_short_url())
+    client.get("/?link=" + quote("  " + PASTE + "\n", safe=""))
+    assert json.loads(mocked.calls[0].request.body)["longUrl"] == PASTE

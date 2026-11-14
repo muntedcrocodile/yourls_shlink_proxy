@@ -2,6 +2,7 @@ from flask import Flask, request, Response
 import requests
 import logging
 import os
+from urllib.parse import urlsplit
 
 app = Flask(__name__)
 
@@ -14,6 +15,10 @@ SHLINK_API_KEY = os.environ.get('SHLINK_API_KEY')
 # Seconds to wait for Shlink. Keep below PrivateBin's 10s client-side abort and
 # gunicorn's worker timeout so the client gets a clean error, not a dropped socket.
 SHLINK_TIMEOUT = float(os.environ.get('SHLINK_TIMEOUT', '8'))
+# Shlink happily stores javascript:, data:, file: ... URLs; only forward these.
+ALLOWED_URL_SCHEMES = {s.strip().lower() for s in
+                       os.environ.get('ALLOWED_URL_SCHEMES', 'http,https').split(',') if s.strip()}
+MAX_URL_LENGTH = int(os.environ.get('MAX_URL_LENGTH', '8192'))
 
 
 class ShlinkError(Exception):
@@ -55,6 +60,22 @@ def _parse_shlink_response(response):
     raise ShlinkError(status, kind or 'error', str(detail))
 
 
+def validate_long_url(url):
+    """Return the cleaned URL or raise ShlinkError(400, ...)."""
+    url = (url or '').strip()
+    if not url:
+        raise ShlinkError(400, 'nourl', 'Missing or malformed URL')
+    if len(url) > MAX_URL_LENGTH:
+        raise ShlinkError(400, 'nourl', f'URL is longer than {MAX_URL_LENGTH} characters')
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        raise ShlinkError(400, 'nourl', 'Missing or malformed URL')
+    if parts.scheme.lower() not in ALLOWED_URL_SCHEMES or not parts.netloc or any(c.isspace() for c in url):
+        raise ShlinkError(400, 'nourl', 'Missing or malformed URL')
+    return url
+
+
 def shlink_create(long_url):
     headers = {
         'Content-Type': 'application/json',
@@ -88,7 +109,7 @@ def translate():
     link = request.args.get('link')
 
     try:
-        short = shlink_create(link)
+        short = shlink_create(validate_long_url(link))
     except ShlinkError as exc:
         log.warning('shorten failed: status=%s kind=%s', exc.status, exc.kind)
         # Never put a URL in an error body: PrivateBin extracts the first URL
