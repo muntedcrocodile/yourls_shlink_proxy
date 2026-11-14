@@ -163,6 +163,10 @@ def test_exhausted_link_is_not_reused(make_client):
     assert follow_once(first).status_code == 404          # max visits reached
     second = client.get("/?link=" + quote(url, safe="")).get_data(as_text=True)
     assert second != first
+    # Shlink's findIfExists keeps returning the exhausted *oldest* link; the
+    # proxy must find and reuse the live replacement instead of minting more.
+    third = client.get("/?link=" + quote(url, safe="")).get_data(as_text=True)
+    assert third == second
     assert follow_once(second).headers["Location"] == url
 
 

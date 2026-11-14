@@ -357,8 +357,30 @@ def shlink_create(long_url, slug=None, title=None):
                             expect='shortUrl')
         if not _exhausted(short):
             return short
+        # findIfExists always returns the *oldest* match, so once that one is
+        # used up it would never find the replacement created below. Look
+        # for a newer live one first.
+        live = _find_live_duplicate(request_body)
+        if live:
+            return live
         log.info('existing short URL %s is exhausted; creating a new one', short.get('shortCode'))
     return shlink_call('POST', 'short-urls', json=request_body, expect='shortUrl')
+
+
+def _find_live_duplicate(request_body):
+    page = shlink_call('GET', 'short-urls', expect='shortUrls', params={
+        'searchTerm': request_body['longUrl'], 'orderBy': 'dateCreated-DESC', 'itemsPerPage': 50})
+    want_tags = {t.lower() for t in request_body['tags']}
+    for short in page['shortUrls'].get('data') or []:
+        meta = short.get('meta') or {}
+        if (short.get('longUrl') == request_body['longUrl']
+                and (short.get('domain') or None) == (request_body.get('domain') or None)
+                and {t.lower() for t in short.get('tags') or []} == want_tags
+                and meta.get('maxVisits') == request_body.get('maxVisits')
+                and bool(short.get('crawlable')) == request_body['crawlable']
+                and not _exhausted(short)):
+            return short
+    return None
 
 
 def _exhausted(short):
