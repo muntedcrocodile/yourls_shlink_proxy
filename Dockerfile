@@ -1,21 +1,27 @@
-# Use the official Python 3.9 image
-FROM python:3.9-slim
+# Python 3.9 (the original base) is end-of-life since October 2025.
+FROM python:3.13-slim
 
-# Create a working directory
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
 WORKDIR /app
 
-# Copy the requirements.txt file to the container
 COPY requirements.txt .
-
-# Install the required packages
 RUN pip install -r requirements.txt
 
-# Copy the rest of the app to the container
-COPY . .
+# Only the application code; see .dockerignore (no .git, no .env).
+COPY app.py .
 
-# Set environment variables
-# ENV SHLINK_URL=
-# ENV SHLINK_API_KEY=
+RUN useradd --system --uid 10001 --no-create-home app
+USER app
 
-# Set the WSGI server to use Gunicorn
-CMD ["gunicorn", "-w", "4", "-b", ":8080", "--log-file", "-", "app:app"]
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=4).status == 200 else 1)"]
+
+# The access log records the path only (%(U)s), never the query string: a
+# PrivateBin ?link= query carries the paste's decryption key.
+CMD ["sh", "-c", "exec gunicorn --bind 0.0.0.0:8080 --workers \"${WEB_CONCURRENCY:-2}\" --timeout 30 --worker-tmp-dir /dev/shm --error-logfile - --access-logfile - --access-logformat '%(h)s \"%(m)s %(U)s\" %(s)s %(B)s %(M)sms' 'app:create_app()'"]

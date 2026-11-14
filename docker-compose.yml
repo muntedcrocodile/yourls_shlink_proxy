@@ -1,10 +1,14 @@
-version: '3'
-
 services:
   yourls_shlink_proxy:
     build: .
-    environment:
-      - SHLINK_URL=${SHLINK_URL}
-      - SHLINK_API_KEY=${SHLINK_API_KEY}
+    env_file: .env
+    # Loopback only: publish through your reverse proxy (or put the proxy on
+    # the same Docker network as it) rather than exposing it on all interfaces.
     ports:
-      - 8080:8080
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

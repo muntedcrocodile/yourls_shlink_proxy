@@ -595,6 +595,19 @@ def yourls_api():
     return api_output(params.get('format'), result, params.get('callback', ''))
 
 
+def healthz():
+    """Liveness; with ?deep=1 also checks that Shlink answers /rest/health."""
+    if request.args.get('deep') not in ('1', 'true'):
+        return _text('ok')
+    c = cfg()
+    try:
+        r = requests.get(f'{c.shlink_base}/rest/health', timeout=c.shlink_timeout)
+        ok = r.ok and r.json().get('status') == 'pass'
+    except (requests.RequestException, ValueError, AttributeError):
+        ok = False
+    return _text('ok' if ok else 'shlink unavailable', 200 if ok else 503)
+
+
 def index():
     # `/` serves both the legacy ?link= endpoint and the YOURLS API.
     if 'action' not in request.values and 'link' in request.values:
@@ -629,6 +642,7 @@ def create_app(config=None):
     app.config['PROXY'] = config
     app.add_url_rule('/', 'index', index, methods=['GET', 'POST'])
     app.add_url_rule('/yourls-api.php', 'yourls_api', yourls_api, methods=['GET', 'POST'])
+    app.add_url_rule('/healthz', 'healthz', healthz, methods=['GET'])
     app.after_request(add_cors_headers)
     log.info('proxying to Shlink %s (API v%s)', config.shlink_base, config.shlink_api_version)
     if not config.signature and not config.allowed_url_prefixes:

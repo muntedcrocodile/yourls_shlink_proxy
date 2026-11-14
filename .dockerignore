@@ -1,0 +1,17 @@
+# Keep secrets, VCS history and dev files out of the image.
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+.venv
+venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+tests
+Makefile
+requirements-dev.txt
+pytest.ini
+docker-compose*.yml
+readme.md
