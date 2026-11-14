@@ -5,7 +5,7 @@ import requests
 import logging
 import os
 import re
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from xml.sax.saxutils import escape as xml_escape
 import hashlib
 import hmac
@@ -234,7 +234,12 @@ def _has_prefix(url, prefix):
         return False
     rest = url.split(u.netloc, 1)[1]
     prefix_rest = prefix.split(p.netloc, 1)[1]
-    return rest.startswith(prefix_rest)
+    if not rest.startswith(prefix_rest):
+        return False
+    # Browsers resolve "..", "%2e%2e" and "\\" in the path when following the
+    # redirect, which would step outside a path prefix such as "/bin/".
+    segments = unquote(u.path).split('/')
+    return '\\' not in u.path and '.' not in segments and '..' not in segments
 
 
 # ---- authentication -------------------------------------------------------

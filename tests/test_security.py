@@ -173,3 +173,21 @@ def test_allowed_url_prefixes(make_client, mocked, url, ok):
     assert (yourls.status_code == 200) is ok
     if not ok:
         assert len(mocked.calls) == 0
+
+
+@pytest.mark.parametrize("url, ok", [
+    ("https://example.com/bin/?abc#key", True),
+    ("https://example.com/bin/x/../?abc", False),
+    ("https://example.com/bin/../admin/x", False),
+    ("https://example.com/bin/%2e%2e/admin", False),
+    ("https://example.com/bin/%2E%2E/admin", False),
+    ("https://example.com/bin/./?a", False),
+    ("https://example.com/bin/..\\admin", False),
+    ("https://example.com/bin/x?q=../../y", True),     # only the path matters
+])
+def test_path_prefix_cannot_be_escaped(make_client, mocked, url, ok):
+    # Regression: the prefix was compared as text, but browsers resolve dot
+    # segments (and backslashes) when they follow Shlink's redirect.
+    client = make_client(ALLOWED_URL_PREFIXES="https://example.com/bin/")
+    mocked.post(SHLINK_ENDPOINT, json=shlink_short_url())
+    assert (client.get("/?link=" + quote(url, safe="")).status_code == 200) is ok
